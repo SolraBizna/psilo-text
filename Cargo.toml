@@ -11,3 +11,4 @@ msdfgen = {path="../msdfgen-rs/msdfgen", features = ["freetype-rs"]} #{version =
 msdfgen-lib = "0.1.0"
 log = "0.4"
 libc = "0.2.116"
+rect_packer = "0.2.1"

@@ -9,6 +9,7 @@ use msdfgen::{
     OVERLAP_SUPPORT,
     RGB,
 };
+use rect_packer::Packer;
 
 /// Some type that gives you the information you need to render a particular
 /// glyph image (given a particular atlas). Don't forget to half-pixel it.
@@ -37,69 +38,24 @@ struct Rect {
 
 struct AtlasState<A: AtlasHandler> {
     handle: A::AtlasHandle,
-    /// Free rectangles, sorted in descending order by area
-    free_rects: Vec<Rect>,
+    packer: Packer,
 }
 
 impl<A: AtlasHandler> AtlasState<A> {
     pub fn new(handle: A::AtlasHandle, w: u32, h: u32) -> AtlasState<A> {
         AtlasState {
             handle,
-            free_rects: vec![Rect { x: 0, y: 0, w, h }],
+            packer: Packer::new(rect_packer::Config {
+                width: w as i32, height: h as i32,
+                border_padding: 0, rectangle_padding: 0,
+            }),
         }
-    }
-    fn insert_rect(&mut self, x: u32, y: u32, w: u32, h: u32) {
-        let new_area = w * h;
-        let new_index = match self.free_rects.binary_search_by(|alt| {
-            let alt_area = alt.w * alt.h;
-            alt_area.cmp(&new_area)
-        }) {
-            Ok(x) => x, Err(x) => x, // lol.
-        };
-        self.free_rects.insert(new_index, Rect { x, y, w, h });
     }
     pub fn attempt_fit(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
-        let target_area = w * h;
-        for n in 0 .. self.free_rects.len() {
-            let rect = self.free_rects[n];
-            let this_area = rect.w * rect.h;
-            if this_area < target_area { break }
-            if rect.w >= w && rect.h >= h {
-                // it fits! make splits!
-                self.free_rects.remove(n);
-                if rect.w == w {
-                    if rect.h == h {
-                        // nothing left
-                    }
-                    else {
-                        // only a bottom
-                        self.insert_rect(rect.x, rect.y+h, rect.w, rect.h-h);
-                    }
-                }
-                else {
-                    if rect.h == h {
-                        // only a right
-                        self.insert_rect(rect.x+w, rect.y, rect.w-w, rect.h);
-                    }
-                    else {
-                        // oh no, two!
-                        // whichever one is larger, make it larger(er)
-                        let extra_w = rect.w-w;
-                        let extra_h = rect.h-h;
-                        if extra_w > extra_h {
-                            self.insert_rect(rect.x+w, rect.y, rect.w-w, rect.h);
-                            self.insert_rect(rect.x, rect.y+h, w, rect.h-h);
-                        }
-                        else {
-                            self.insert_rect(rect.x, rect.y+h, rect.w, rect.h-h);
-                            self.insert_rect(rect.x+w, rect.y, w, h);
-                        }
-                    }
-                }
-                return Some((rect.x, rect.y))
-            }
+        match self.packer.pack(w as i32, h as i32, false) {
+            Some(rect) => Some((rect.x as u32, rect.y as u32)),
+            None => None,
         }
-        None
     }
 }
 
