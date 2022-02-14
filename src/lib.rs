@@ -1,7 +1,13 @@
 use std::{
     collections::HashMap,
+    rc::Rc,
+    mem::transmute,
 };
-use freetype::Face;
+use ttf_parser::{
+    Face,
+    FaceParsingError,
+    GlyphId,
+};
 use msdfgen::{
     Bitmap,
     FontExt,
@@ -10,6 +16,7 @@ use msdfgen::{
     RGB,
 };
 use rect_packer::Packer;
+use log::warn;
 
 /// Some type that gives you the information you need to render a particular
 /// glyph image (given a particular atlas). Don't forget to half-pixel it.
@@ -65,7 +72,12 @@ struct GlyphState<A: AtlasHandler> {
 }
 
 struct FaceState {
-    face: Face,
+    /// This field is what `face` actually borrows from. `Rc` doesn't provide
+    /// interior mutability, and without interior mutability the allocated
+    /// block will never move, so this is *sound* (but not *safe*), as long as
+    /// `face` is never moved out of us.
+    _face_data: Rc<Vec<u8>>,
+    face: Face<'static>, // the lifetime is a lie! never move out of this field
     border_texels: f32,
     texels_per_em_x: f32,
     texels_per_em_y: f32,
@@ -74,7 +86,7 @@ struct FaceState {
 pub struct Font<A: AtlasHandler> {
     faces: Vec<FaceState>,
     atlases: Vec<AtlasState<A>>,
-    glyphs: HashMap<u32, Option<GlyphState<A>>>,
+    glyphs: HashMap<u16, Option<GlyphState<A>>>,
 }
 
 impl<A: AtlasHandler> Font<A> {
@@ -87,19 +99,26 @@ impl<A: AtlasHandler> Font<A> {
     /// font should occupy in the atlas. This should be experimentally
     /// determined per font. 64 is usually a good starting point. Thinner fonts
     /// will need higher values.
-    pub fn add_face(&mut self, face: Face, border_texels: f32,
-                    texels_per_em_x: f32, texels_per_em_y: f32) -> usize {
-        self.faces.push(FaceState { face, border_texels,
+    pub fn add_face(&mut self, face_data: Rc<Vec<u8>>, index: u32,
+                    border_texels: f32,
+                    texels_per_em_x: f32, texels_per_em_y: f32)
+        -> Result<usize, FaceParsingError> {
+        let face = Face::from_slice(&face_data, index)?;
+        let face: Face<'static> = unsafe { transmute(face) };
+        self.faces.push(FaceState { _face_data: face_data, face, border_texels,
                                     texels_per_em_x, texels_per_em_y });
-        self.faces.len()-1
+        Ok(self.faces.len()-1)
     }
     pub fn get_face(&self, i: usize) -> Option<&Face> {
-        self.faces.get(i).map(|x| &x.face)
+        // We need to massage the lifetime here. We have told the compiler that
+        // this Face has `'static` lifetime, but in truth it is only valid as
+        // long as we are. `transmute` will do the appropriate massaging.
+        unsafe { transmute(self.faces.get(i).map(|x| &x.face)) }
     }
     pub fn get_face_mut(&mut self, i: usize) -> Option<&mut Face> {
-        self.faces.get_mut(i).map(|x| &mut x.face)
+        unsafe { transmute(self.faces.get_mut(i).map(|x| &mut x.face)) }
     }
-    pub fn get_glyph(&mut self, face: usize, glyph: u32, handler: &mut A)
+    pub fn get_glyph(&mut self, face: usize, glyph: u16, handler: &mut A)
         -> Result<Option<(A::AtlasHandle, A::AtlasCoords)>, A::E> {
         let mut err = None;
         let ret = self.glyphs.entry(glyph).or_insert_with(|| {
@@ -107,14 +126,27 @@ impl<A: AtlasHandler> Font<A> {
             let face_state = self.faces.get_mut(face)
                 .expect("Face index out of range");
             let face = &face_state.face;
-            let mut shape = face.glyph_shape(glyph).unwrap();
-            let cbox = face.glyph().get_glyph().unwrap().get_cbox(0);
-            let glyph_width = cbox.xMax - cbox.xMin;
-            let glyph_height = cbox.yMax - cbox.yMin;
+            let mut shape = match face.glyph_shape(GlyphId(glyph)) {
+                Some(x) => x,
+                None => {
+                    warn!("glyph {} appears to have no shape!", glyph);
+                    return None;
+                },
+            };
+            let cbox = match face.glyph_bounding_box(GlyphId(glyph)) {
+                Some(bbox) => bbox,
+                None => {
+                    warn!("psilo-font only supports outline glyphs, but this \
+                           font seems to contain an image glyph");
+                    return None;
+                }
+            };
+            let glyph_width = cbox.x_max - cbox.x_min;
+            let glyph_height = cbox.y_max - cbox.y_min;
             let sdf_width = glyph_width as f32 * face_state.texels_per_em_x
-                / face.em_size() as f32 + face_state.border_texels;
+                / face.units_per_em() as f32 + face_state.border_texels;
             let sdf_height = glyph_height as f32 * face_state.texels_per_em_y
-                / face.em_size() as f32 + face_state.border_texels;
+                / face.units_per_em() as f32 + face_state.border_texels;
             let sdf_width = sdf_width.ceil() as u32;
             let sdf_height = sdf_height.ceil() as u32;
             let framing = match shape
