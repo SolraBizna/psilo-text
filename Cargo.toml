@@ -1,14 +1,15 @@
 [package]
-name = "psilo-font"
+name = "psilo-text"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ttf-parser = "0.14.0"
+ttf-parser = "0.12.3"
 msdfgen = {path="../msdfgen-rs/msdfgen", features = ["ttf-parser"]} #{version = "0.1.0", features = ["freetype-rs"]}
 msdfgen-lib = "0.1.0"
 log = "0.4"
 libc = "0.2.116"
 rect_packer = "0.2.1"
+rustybuzz = "0.4.0"

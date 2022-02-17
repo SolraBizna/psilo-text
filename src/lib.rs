@@ -3,11 +3,7 @@ use std::{
     rc::Rc,
     mem::transmute,
 };
-use ttf_parser::{
-    Face,
-    FaceParsingError,
-    GlyphId,
-};
+use ttf_parser::GlyphId;
 use msdfgen::{
     Bitmap,
     FontExt,
@@ -16,13 +12,20 @@ use msdfgen::{
     RGB,
 };
 use rect_packer::Packer;
+use rustybuzz::Face;
 use log::warn;
 
 /// Some type that gives you the information you need to render a particular
-/// glyph image (given a particular atlas). Don't forget to half-pixel it.
+/// glyph image (given a particular atlas). Don't forget to account for the
+/// half-pixel borders, if that applies to your situation!
 pub trait AtlasCoords {
     type A : AtlasHandler;
-    fn from_atlas_region(x: u32, y: u32, w: u32, h: u32,
+    /// `atlas_*`: the coordinates of this glyph image in the atlas.
+    /// `glyph_*`: the glyph's bounding box information, in ems.
+    fn from_atlas_region(atlas_x: u32, atlas_y: u32,
+                         atlas_w: u32, atlas_h: u32,
+                         render_x_min: f32, render_y_min: f32,
+                         render_x_max: f32, render_y_max: f32,
                          handler: &mut Self::A) -> Self;
 }
 
@@ -72,42 +75,48 @@ struct GlyphState<A: AtlasHandler> {
 }
 
 struct FaceState {
-    /// This field is what `face` actually borrows from. `Rc` doesn't provide
+    /// This field is what `*_face` actually borrows from. `Rc` doesn't provide
     /// interior mutability, and without interior mutability the allocated
     /// block will never move, so this is *sound* (but not *safe*), as long as
-    /// `face` is never moved out of us.
+    /// `*_face` is never moved out of us.
     _face_data: Rc<Vec<u8>>,
-    face: Face<'static>, // the lifetime is a lie! never move out of this field
+    face: Face<'static>,
     border_texels: f32,
     texels_per_em_x: f32,
     texels_per_em_y: f32,
 }
 
-pub struct Font<A: AtlasHandler> {
+pub struct TextHandler<A: AtlasHandler> {
     faces: Vec<FaceState>,
     atlases: Vec<AtlasState<A>>,
     glyphs: HashMap<u16, Option<GlyphState<A>>>,
 }
 
-impl<A: AtlasHandler> Font<A> {
-    pub fn new() -> Font<A> {
-        Font { faces: Vec::new(), atlases: Vec::new(), glyphs: HashMap::new() }
+impl<A: AtlasHandler> TextHandler<A> {
+    pub fn new() -> TextHandler<A> {
+        TextHandler {
+            faces: Vec::new(),
+            atlases: Vec::new(),
+            glyphs: HashMap::new(),
+        }
     }
-    /// `border_texels`: The number of texels of extra padding to put around
-    /// each SDF in the atlas for this face. When in doubt, use 4.0.
-    /// `texels_per_em_*`: The number of texels that a single em in the given
-    /// font should occupy in the atlas. This should be experimentally
-    /// determined per font. 64 is usually a good starting point. Thinner fonts
-    /// will need higher values.
+    /// - `border_texels`: The number of texels of extra padding to put around
+    ///   each SDF in the atlas for this face. When in doubt, use 4.0. This is
+    ///   also the effective range of the SDF, so values less than 2.0 are
+    ///   suicide!
+    /// - `texels_per_em_*`: The number of texels that a single em in the given
+    ///   font should occupy in the atlas. This should be experimentally
+    ///   determined per font. 64 is usually a good starting point. Thinner
+    ///   fonts will need higher values.
     pub fn add_face(&mut self, face_data: Rc<Vec<u8>>, index: u32,
                     border_texels: f32,
                     texels_per_em_x: f32, texels_per_em_y: f32)
-        -> Result<usize, FaceParsingError> {
+        -> Option<usize> {
         let face = Face::from_slice(&face_data, index)?;
         let face: Face<'static> = unsafe { transmute(face) };
         self.faces.push(FaceState { _face_data: face_data, face, border_texels,
                                     texels_per_em_x, texels_per_em_y });
-        Ok(self.faces.len()-1)
+        Some(self.faces.len()-1)
     }
     pub fn get_face(&self, i: usize) -> Option<&Face> {
         // We need to massage the lifetime here. We have told the compiler that
@@ -133,7 +142,7 @@ impl<A: AtlasHandler> Font<A> {
                     return None;
                 },
             };
-            let cbox = match face.glyph_bounding_box(GlyphId(glyph)) {
+            let bbox = match face.glyph_bounding_box(GlyphId(glyph)) {
                 Some(bbox) => bbox,
                 None => {
                     warn!("psilo-font only supports outline glyphs, but this \
@@ -141,24 +150,35 @@ impl<A: AtlasHandler> Font<A> {
                     return None;
                 }
             };
-            let glyph_width = cbox.x_max - cbox.x_min;
-            let glyph_height = cbox.y_max - cbox.y_min;
-            let sdf_width = glyph_width as f32 * face_state.texels_per_em_x
-                / face.units_per_em() as f32 + face_state.border_texels;
-            let sdf_height = glyph_height as f32 * face_state.texels_per_em_y
-                / face.units_per_em() as f32 + face_state.border_texels;
-            let sdf_width = sdf_width.ceil() as u32;
-            let sdf_height = sdf_height.ceil() as u32;
-            let framing = match shape
-                .get_bounds()
-                .autoframe(sdf_width, sdf_height,
-                           msdfgen::Range::Px(face_state.border_texels as f64),
-                           None) {
-                    None => { return None },
-                    Some(x) => x,
-                };
+            let per_em = face.units_per_em() as f32;
+            let raw_glyph_width = (bbox.x_max - bbox.x_min) as f32;
+            let raw_glyph_height = (bbox.y_max - bbox.y_min) as f32;
+            let glyph_width = raw_glyph_width
+                * face_state.texels_per_em_x / per_em;
+            let glyph_height = raw_glyph_height
+                * face_state.texels_per_em_y / per_em;
+            let sdf_width = (glyph_width + face_state.border_texels).ceil();
+            let sdf_height = (glyph_height + face_state.border_texels).ceil();
+            let wrangled_glyph_width = sdf_width - face_state.border_texels;
+            let wrangled_glyph_height = sdf_height - face_state.border_texels;
+            let sdf_width_int = sdf_width.ceil() as u32;
+            let sdf_height_int = sdf_height.ceil() as u32;
+            // font units -> sdf pixels
+            let scale_x = wrangled_glyph_width / raw_glyph_width;
+            let scale_y = wrangled_glyph_height / raw_glyph_height;
+            let translate_x
+                = face_state.border_texels / (scale_x * 2.0)
+                - bbox.x_min as f32;
+            let translate_y
+                = face_state.border_texels / (scale_y * 2.0)
+                - bbox.y_min as f32;
+            let framing = msdfgen::Framing::new(
+                face_state.border_texels as f64,
+                msdfgen::Vector2::new(scale_x as f64, scale_y as f64),
+                msdfgen::Vector2::new(translate_x as f64, translate_y as f64),
+            );
 
-            let mut bitmap = Bitmap::new(sdf_width, sdf_height);
+            let mut bitmap = Bitmap::new(sdf_width_int, sdf_height_int);
 
             // Is this still right?
             shape.edge_coloring_simple(3.0, 0);
@@ -175,10 +195,12 @@ impl<A: AtlasHandler> Font<A> {
             let mut outer_x = 0;
             let mut outer_y = 0;
             for (index, state) in self.atlases.iter_mut().enumerate() {
-                if let Some((x, y)) = state.attempt_fit(sdf_width, sdf_height){
+                if let Some((x, y)) = state.attempt_fit(sdf_width_int,
+                                                        sdf_height_int) {
                     if let Err(e)
                         = handler.add_to_atlas(state.handle,
-                                               x, y, sdf_width, sdf_height,
+                                               x, y,
+                                               sdf_width_int, sdf_height_int,
                                                bitmap.raw_pixels()) {
                             err = Some(e);
                             return None
@@ -202,11 +224,13 @@ impl<A: AtlasHandler> Font<A> {
                         };
                     self.atlases.push(AtlasState::new(handle, w, h));
                     let state = self.atlases.last_mut().unwrap();
-                    if let Some((x, y)) = state.attempt_fit(sdf_width,
-                                                            sdf_height) {
+                    if let Some((x, y)) = state.attempt_fit(sdf_width_int,
+                                                            sdf_height_int) {
                         if let Err(e)
                             = handler.add_to_atlas(state.handle,
-                                                   x, y, sdf_width, sdf_height,
+                                                   x, y,
+                                                   sdf_width_int,
+                                                   sdf_height_int,
                                                    bitmap.raw_pixels()) {
                                 err = Some(e);
                                 return None
@@ -218,11 +242,26 @@ impl<A: AtlasHandler> Font<A> {
                 },
                 Some(x) => x,
             };
+            let atlas_x = outer_x;
+            let atlas_y = outer_y;
+            let atlas_w = sdf_width_int;
+            let atlas_h = sdf_height_int;
+            let half_extra_width = (sdf_width - glyph_width)
+                / face_state.texels_per_em_x * 0.5;
+            let half_extra_height = (sdf_height - glyph_height)
+                / face_state.texels_per_em_y * 0.5;
+            let render_x_min = bbox.x_min as f32 / per_em - half_extra_width;
+            let render_y_min = bbox.y_min as f32 / per_em - half_extra_height;
+            let render_x_max = bbox.x_max as f32 / per_em + half_extra_width;
+            let render_y_max = bbox.y_max as f32 / per_em + half_extra_height;
+            let coords = A::AtlasCoords
+                ::from_atlas_region(atlas_x, atlas_y, atlas_w, atlas_h,
+                                    render_x_min, render_y_min,
+                                    render_x_max, render_y_max,
+                                    handler);
             Some(GlyphState {
                 atlas: atlas_index as u32,
-                coords: A::AtlasCoords::from_atlas_region(outer_x, outer_y,
-                                                          sdf_width,sdf_height,
-                                                          handler)
+                coords,
             })
         });
         if let Some(e) = err { Err(e) }
