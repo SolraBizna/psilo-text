@@ -33,30 +33,30 @@ use rect_packer::Packer;
 use rustybuzz::Face;
 use log::warn;
 
-/// Some type that gives you the information you need to render a particular
-/// glyph image (given a particular atlas). Don't forget to account for the
-/// half-pixel borders, if that applies to your situation!
-pub trait AtlasCoords {
-    type A : AtlasHandler;
-    /// `atlas_*`: the coordinates of this glyph image in the atlas.
-    /// `glyph_*`: the glyph's bounding box information, in ems.
-    fn from_atlas_region(atlas_x: u32, atlas_y: u32,
-                         atlas_w: u32, atlas_h: u32,
-                         render_x_min: f32, render_y_min: f32,
-                         render_x_max: f32, render_y_max: f32,
-                         handler: &mut Self::A) -> Self;
-}
-
 pub trait AtlasHandler {
-    type AtlasHandle : Copy;
-    type AtlasCoords : Copy + AtlasCoords<A = Self>;
+    type AtlasID : Copy;
+    type AtlasCoords : Copy;
     type E;
-    fn new_atlas(&mut self) -> Result<(Self::AtlasHandle, u32, u32), Self::E>;
+    /// Create a new, blank atlas.
+    fn new_atlas(&mut self) -> Result<Self::AtlasID, Self::E>;
+    /// Return the size of the atlases that this handler will create. We call
+    /// this a lot, so if determining this value is expensive, cache it!
+    fn get_atlas_size(&mut self) -> (u32, u32);
+    /// This function performs two operations:
+    ///
+    /// 1. Upload the given glyph pixels to the given region of the given
+    ///    atlas.
+    /// 2. Return an `AtlasCoords` that provide enough information to later
+    ///    render this glyph.
+    ///
+    /// (Don't forget to account for the half-texel borders!)
     fn add_to_atlas(&mut self,
-                    target_atlas: Self::AtlasHandle,
+                    target_atlas: Self::AtlasID,
+                    render_x_min: f32, render_y_min: f32,
+                    render_x_max: f32, render_y_max: f32,
                     glyph_x: u32, glyph_y: u32,
                     glyph_width: u32, glyph_height: u32,
-                    glyph_pixels: &[u8]) -> Result<(), Self::E>;
+                    glyph_pixels: &[u8]) -> Result<Self::AtlasCoords, Self::E>;
 }
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -64,13 +64,13 @@ struct Rect {
     x: u32, y: u32, w: u32, h: u32,
 }
 
-struct AtlasState<A: AtlasHandler> {
-    handle: A::AtlasHandle,
+struct AtlasState<AtlasID: Copy> {
+    handle: AtlasID,
     packer: Packer,
 }
 
-impl<A: AtlasHandler> AtlasState<A> {
-    pub fn new(handle: A::AtlasHandle, w: u32, h: u32) -> AtlasState<A> {
+impl<AtlasID: Copy> AtlasState<AtlasID> {
+    pub fn new(handle: AtlasID, w: u32, h: u32) -> AtlasState<AtlasID>{
         AtlasState {
             handle,
             packer: Packer::new(rect_packer::Config {
@@ -87,9 +87,9 @@ impl<A: AtlasHandler> AtlasState<A> {
     }
 }
 
-struct GlyphState<A: AtlasHandler> {
-    atlas: u32,
-    coords: A::AtlasCoords,
+struct GlyphState<AtlasID: Copy, AtlasCoords: Copy> {
+    atlas: AtlasID,
+    coords: AtlasCoords,
 }
 
 struct FaceState {
@@ -104,14 +104,14 @@ struct FaceState {
     texels_per_em_y: f32,
 }
 
-pub struct TextHandler<A: AtlasHandler> {
+pub struct TextHandler<AtlasID: Copy, AtlasCoords: Copy> {
     faces: Vec<FaceState>,
-    atlases: Vec<AtlasState<A>>,
-    glyphs: HashMap<u16, Option<GlyphState<A>>>,
+    atlases: Vec<AtlasState<AtlasID>>,
+    glyphs: HashMap<u16, Option<GlyphState<AtlasID, AtlasCoords>>>,
 }
 
-impl<A: AtlasHandler> TextHandler<A> {
-    pub fn new() -> TextHandler<A> {
+impl<AtlasID: Copy, AtlasCoords: Copy> TextHandler<AtlasID, AtlasCoords> {
+    pub fn new() -> TextHandler<AtlasID, AtlasCoords> {
         TextHandler {
             faces: Vec::new(),
             atlases: Vec::new(),
@@ -145,10 +145,12 @@ impl<A: AtlasHandler> TextHandler<A> {
     pub fn get_face_mut(&mut self, i: usize) -> Option<&mut Face> {
         unsafe { transmute(self.faces.get_mut(i).map(|x| &mut x.face)) }
     }
-    pub fn get_glyph(&mut self, face: usize, glyph: u16, handler: &mut A)
-        -> Result<Option<(A::AtlasHandle, A::AtlasCoords)>, A::E> {
+    pub fn get_glyph<A>(&mut self, face: usize, glyph: u16, handler: &mut A)
+        -> Result<Option<(AtlasID, AtlasCoords)>, A::E>
+    where A: AtlasHandler<AtlasID=AtlasID, AtlasCoords=AtlasCoords> {
         let mut err = None;
         let ret = self.glyphs.entry(glyph).or_insert_with(|| {
+            let (atlas_w, atlas_h) = handler.get_atlas_size();
             // get the glyph from the font
             let face_state = self.faces.get_mut(face)
                 .expect("Face index out of range");
@@ -179,8 +181,8 @@ impl<A: AtlasHandler> TextHandler<A> {
             let sdf_height = (glyph_height + face_state.border_texels).ceil();
             let wrangled_glyph_width = sdf_width - face_state.border_texels;
             let wrangled_glyph_height = sdf_height - face_state.border_texels;
-            let sdf_width_int = sdf_width.ceil() as u32;
-            let sdf_height_int = sdf_height.ceil() as u32;
+            let sdf_width_int = (sdf_width.ceil() as u32).min(atlas_w);
+            let sdf_height_int = (sdf_height.ceil() as u32).min(atlas_h);
             // font units -> sdf pixels
             let scale_x = wrangled_glyph_width / raw_glyph_width;
             let scale_y = wrangled_glyph_height / raw_glyph_height;
@@ -191,7 +193,7 @@ impl<A: AtlasHandler> TextHandler<A> {
                 = face_state.border_texels / (scale_y * 2.0)
                 - bbox.y_min as f32;
             let framing = msdfgen::Framing::new(
-                face_state.border_texels as f64,
+                face_state.border_texels as f64 * 16.0,
                 msdfgen::Vector2::new(scale_x as f64, scale_y as f64),
                 msdfgen::Vector2::new(translate_x as f64, translate_y as f64),
             );
@@ -209,59 +211,38 @@ impl<A: AtlasHandler> TextHandler<A> {
             let bitmap: Bitmap<RGB<u8>> = bitmap.convert();
 
             // put it in the atlas
-            let mut atlas_index = None;
-            let mut outer_x = 0;
-            let mut outer_y = 0;
-            for (index, state) in self.atlases.iter_mut().enumerate() {
+            let mut fit = None;
+            for state in self.atlases.iter_mut() {
                 if let Some((x, y)) = state.attempt_fit(sdf_width_int,
                                                         sdf_height_int) {
-                    if let Err(e)
-                        = handler.add_to_atlas(state.handle,
-                                               x, y,
-                                               sdf_width_int, sdf_height_int,
-                                               bitmap.raw_pixels()) {
-                            err = Some(e);
-                            return None
-                        }
-                    atlas_index = Some(index);
-                    outer_x = x;
-                    outer_y = y;
+                    fit = Some((state.handle, x, y));
                     break;
                 }
             }
-            let atlas_index = match atlas_index {
+            let (atlas_handle, atlas_x, atlas_y) = match fit {
+                Some(x) => x,
                 None => {
-                    // make a new atlas and add it to that
-                    let (handle, w, h) = match handler
-                        .new_atlas() {
-                            Ok(x) => x,
-                            Err(x) => {
-                                err = Some(x);
-                                return None;
-                            }
-                        };
-                    self.atlases.push(AtlasState::new(handle, w, h));
+                    let handle = match handler.new_atlas() {
+                        Ok(x) => x,
+                        Err(x) => {
+                            err = Some(x);
+                            return None;
+                        },
+                    };
+                    self.atlases.push(AtlasState::new(handle,atlas_w,atlas_h));
                     let state = self.atlases.last_mut().unwrap();
                     if let Some((x, y)) = state.attempt_fit(sdf_width_int,
                                                             sdf_height_int) {
-                        if let Err(e)
-                            = handler.add_to_atlas(state.handle,
-                                                   x, y,
-                                                   sdf_width_int,
-                                                   sdf_height_int,
-                                                   bitmap.raw_pixels()) {
-                                err = Some(e);
-                                return None
-                            }
-                        outer_x = x;
-                        outer_y = y;
+                        (state.handle, x, y)
                     }
-                    self.atlases.len() - 1
+                    else {
+                        // We have made sure that sdf_width_int and
+                        // sdf_height_int are at least as large as our atlases.
+                        // This case will never arise.
+                        unreachable!();
+                    }
                 },
-                Some(x) => x,
             };
-            let atlas_x = outer_x;
-            let atlas_y = outer_y;
             let atlas_w = sdf_width_int;
             let atlas_h = sdf_height_int;
             let half_extra_width = (sdf_width - glyph_width)
@@ -272,19 +253,27 @@ impl<A: AtlasHandler> TextHandler<A> {
             let render_y_min = bbox.y_min as f32 / per_em - half_extra_height;
             let render_x_max = bbox.x_max as f32 / per_em + half_extra_width;
             let render_y_max = bbox.y_max as f32 / per_em + half_extra_height;
-            let coords = A::AtlasCoords
-                ::from_atlas_region(atlas_x, atlas_y, atlas_w, atlas_h,
-                                    render_x_min, render_y_min,
-                                    render_x_max, render_y_max,
-                                    handler);
+            let res = handler.add_to_atlas(atlas_handle,
+                                           render_x_min, render_y_min,
+                                           render_x_max, render_y_max,
+                                           atlas_x, atlas_y,
+                                           atlas_w, atlas_h,
+                                           bitmap.raw_pixels());
+            let coords = match res {
+                Err(e) => {
+                    err = Some(e);
+                    return None;
+                },
+                Ok(x) => x,
+            };
             Some(GlyphState {
-                atlas: atlas_index as u32,
+                atlas: atlas_handle,
                 coords,
             })
         });
         if let Some(e) = err { Err(e) }
         else {
-            Ok(ret.as_ref().map(|ret| (self.atlases[ret.atlas as usize].handle, ret.coords)))
+            Ok(ret.as_ref().map(|ret| (ret.atlas, ret.coords)))
         }
     }
 }
