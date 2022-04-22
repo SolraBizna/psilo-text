@@ -18,8 +18,8 @@
 
 use std::{
     collections::HashMap,
-    rc::Rc,
     mem::transmute,
+    sync::Arc,
 };
 use ttf_parser::GlyphId;
 use msdfgen::{
@@ -93,11 +93,11 @@ struct GlyphState<AtlasID: Copy, AtlasCoords: Copy> {
 }
 
 struct FaceState {
-    /// This field is what `*_face` actually borrows from. `Rc` doesn't provide
+    /// This field is what `*_face` actually borrows from. `Arc` doesn't provide
     /// interior mutability, and without interior mutability the allocated
     /// block will never move, so this is *sound* (but not *safe*), as long as
     /// `*_face` is never moved out of us.
-    _face_data: Rc<Vec<u8>>,
+    _face_data: Arc<Vec<u8>>,
     face: Face<'static>,
     border_texels: f32,
     texels_per_em_x: f32,
@@ -126,7 +126,7 @@ impl<AtlasID: Copy, AtlasCoords: Copy> TextHandler<AtlasID, AtlasCoords> {
     ///   font should occupy in the atlas. This should be experimentally
     ///   determined per font. 64 is usually a good starting point. Thinner
     ///   fonts will need higher values.
-    pub fn add_face(&mut self, face_data: Rc<Vec<u8>>, index: u32,
+    pub fn add_face(&mut self, face_data: Arc<Vec<u8>>, index: u32,
                     border_texels: f32,
                     texels_per_em_x: f32, texels_per_em_y: f32)
         -> Option<usize> {
