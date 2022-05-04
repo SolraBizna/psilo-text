@@ -17,7 +17,7 @@
 //! [1]: https://github.com/Chlumsky/msdfgen/files/3050967/thesis.pdf
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::HashMap,
     mem::transmute,
     sync::Arc,
 };
@@ -31,7 +31,7 @@ use msdfgen::{
 };
 use rect_packer::Packer;
 use rustybuzz::Face;
-use log::{error, warn};
+use log::warn;
 
 #[cfg(feature="bg-render")]
 mod bg;
@@ -286,6 +286,7 @@ impl<AtlasID: Copy, AtlasCoords: Copy> TextHandler<AtlasID, AtlasCoords> {
                         render_x_max, render_y_max, sdf_width_int,
                         sdf_height_int, bitmap))
             = self.bg.next_rendered_glyph() {
+                use std::collections::hash_map::Entry;
                 match self.glyphs.entry((face, glyph)) {
                     Entry::Vacant(_) => {
                         warn!("Glyph {} of face {}: rendered without us \
@@ -305,8 +306,9 @@ impl<AtlasID: Copy, AtlasCoords: Copy> TextHandler<AtlasID, AtlasCoords> {
                                     ent.insert(GlyphStateInCache::Present(res));
                                 },
                                 Err(_) => {
-                                    error!("Error inserting background-rendered \
-                                            glyph!",);
+                                    log::error!("Error inserting \
+                                                 background-rendered \
+                                                 glyph!");
                                     ent.insert(GlyphStateInCache::Null);
                                 }
                             }
