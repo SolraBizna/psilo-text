@@ -1,0 +1,9 @@
+[package]
+name = "force-resolver-version-2"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+
+[features]
+break = []
