@@ -2,13 +2,16 @@
 name = "psilo-text"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Solra Bizna <solra@bizna.name>"]
+description = "Runtime crate that renders glyphs to multichannel signed distance fields and packs those MSDFs into atlases, suitable for subsequent very fast display"
+readme = "README.md"
+license = "MIT OR APACHE-2.0"
+keywords = ["gamedev", "text-rendering", "msdf"]
+categories = ["graphics", "rendering", "rendering::data-formats"]
 
 [dependencies]
 ttf-parser = "0.12.3"
-msdfgen = {path="../msdfgen-rs/msdfgen", features = ["ttf-parser"]} #{version = "0.1.0", features = ["freetype-rs"]}
-msdfgen-lib = "0.1.0"
+msdfgen = { git = "https://github.com/katyo/msdfgen-rs", rev = "8d9c95dc305d880a97c4b385f106ba6e45461f98", features = ["ttf-parser"] }
 log = "0.4"
 libc = "0.2.116"
 rect_packer = "0.2.1"

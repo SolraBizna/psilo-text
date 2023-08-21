@@ -15,6 +15,61 @@
 //! overhead. For more information, see [Chlumský's Master's thesis][1].
 //!
 //! [1]: https://github.com/Chlumsky/msdfgen/files/3050967/thesis.pdf
+//!
+//! # How to use
+//!
+//! - Implement [`AtlasHandler`][2].
+//! - Create a [`TextHandler`][3].
+//! - Load your font files (or files) into a `Vec<u8>`.
+//! - Add faces with [`add_face`][4].
+//! - Use a shaping engine (I recommend [`rustybuzz`][5]) or a layout engine
+//!   (like Pango) to determine which glyphs to draw where. (`TextHandler` is
+//!   maintaining ownership of each font `Face`, you can use [`get_face`][6] to
+//!   get a reference that you can pass to the shaping/layout engine.)
+//! - Use [`get_glyph`][7] for each glyph to render. It will tell you which
+//!   atlas to render from, and what coordinates.
+//!
+//! The details of implementing `AtlasHandler` and actually rendering the
+//! glyphs are out of the scope of this documentation, and will depend on what
+//! graphics API you're using.
+//!
+//! [2]: trait.AtlasHandler.html
+//! [3]: struct.TextHandler.html
+//! [4]: struct.TextHandler.html#method.add_face
+//! [5]: https://crates.io/crates/rustybuzz
+//! [6]: struct.TextHandler.html#method.get_face
+//! [7]: struct.TextHandler.html#method.get_glyph
+//!
+//! # Background rendering
+//!
+//! By default, glyphs are always rendered "in the foreground". When you
+//! request a glyph that hasn't been rendered before, there will be a brief
+//! hitch while that glyph is rendered. If you enable the `bg-render` feature,
+//! a new method appears on `TextHandler` (`set_render_in_background`), and
+//! background rendering will be *enabled* unless you use that method to
+//! turn it off.
+//!
+//! If background rendering is enabled, when you request a glyph that hasn't
+//! been rendered before, `get_glyph` will immediately return `Ok(None)`, as if
+//! for a missing glyph. But, the glyph in question will have been dispatched
+//! to a background thread, where it will be rendered without hitching the
+//! calling thread. After the glyph is done rendering, `get_glyph` will start
+//! returning `Ok(Some(...))` for that glyph. Instead of a hitch, this results
+//! in glyphs "spawning in" over a short period of time after they are first
+//! requested.
+//!
+//! Both hitches and glyphs "spawning in" are undesirable, but often one or the
+//! other is a lesser of two evils for your project. If both are unacceptable,
+//! you should consider prerolling your glyphs ahead of time. This crate isn't
+//! optimal for use in "pre-baking" atlases, but you could use it for that. I
+//! prefer a runtime-driven approach, because sometimes, you can't guess ahead
+//! of time *all* the glyphs your program will actually use, especially when
+//! you add multiplayer, user-driven content, or localization to the mix.
+//!
+//! An approach I've used with some success is immediately "rendering" a dummy
+//! string containing all of the anticipated glyphs during the initial loading
+//! phase, followed by rendering any "surprise" glyphs in the background as
+//! they arise.
 
 use std::{
     collections::HashMap,
