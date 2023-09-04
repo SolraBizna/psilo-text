@@ -1,8 +1,6 @@
-use std::{
-    sync::{Arc, mpsc},
-};
+use std::sync::{Arc, mpsc};
 use ttf_parser::GlyphId;
-use msdfgen::{Bitmap, RGB};
+use image::RgbImage;
 use rustybuzz::Face;
 
 use super::FaceState;
@@ -21,7 +19,7 @@ enum BgCmd {
 pub(crate) struct Renderer {
     command_tx: mpsc::Sender<BgCmd>,
     glyph_rx: mpsc::Receiver<(usize, u16, f32, f32, f32, f32, u32, u32,
-                              Bitmap<RGB<u8>>)>,
+                              RgbImage)>,
 }
 
 impl Renderer {
@@ -80,7 +78,7 @@ impl Renderer {
     }
     pub fn next_rendered_glyph(&self)
         -> Option<(usize, u16, f32, f32, f32, f32, u32, u32,
-                   Bitmap<RGB<u8>>)> {
+                   RgbImage)> {
             self.glyph_rx.try_recv().ok()
         }
 }

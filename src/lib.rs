@@ -77,16 +77,17 @@ use std::{
     sync::Arc,
 };
 use ttf_parser::GlyphId;
-use msdfgen::{
-    Bitmap,
-    FontExt,
-    EDGE_THRESHOLD,
-    OVERLAP_SUPPORT,
-    RGB,
+use fdsm::{
+    shape::Shape,
+    transform::Transform, bezier::scanline::FillRule,
 };
+use image::RgbImage;
 use rect_packer::Packer;
 use rustybuzz::Face;
 use log::warn;
+
+type Affine = nalgebra::Affine2<f64>;
+type Matrix = nalgebra::Matrix3<f64>;
 
 #[cfg(feature="bg-render")]
 mod bg;
@@ -172,16 +173,8 @@ impl FaceState {
     /// Returns `None` if the given glyph is not present in the font, or if it
     /// has no actual shape.
     pub fn render_glyph(&self, glyph: GlyphId, atlas_w: u32, atlas_h: u32)
-        -> Option<(f32, f32, f32, f32, u32, u32, Bitmap<RGB<u8>>)> {
-        let mut shape = match self.face.glyph_shape(glyph) {
-            Some(x) => x,
-            None => {
-                // This warning was more common than I thought, and not really
-                // actionable.
-                //warn!("glyph {} appears to have no shape!", glyph);
-                return None;
-            },
-        };
+        -> Option<(f32, f32, f32, f32, u32, u32, RgbImage)> {
+        let mut shape = Shape::load_from_face(&self.face, glyph);
         let bbox = match self.face.glyph_bounding_box(glyph) {
             Some(bbox) => bbox,
             None => {
@@ -207,28 +200,38 @@ impl FaceState {
         let scale_x = wrangled_glyph_width / raw_glyph_width;
         let scale_y = wrangled_glyph_height / raw_glyph_height;
         let translate_x
-            = self.border_texels / (scale_x * 2.0)
-            - bbox.x_min as f32;
+            = self.border_texels * 0.5
+            - bbox.x_min as f32 * scale_x;
         let translate_y
-            = self.border_texels / (scale_y * 2.0)
-            - bbox.y_min as f32;
-        let framing = msdfgen::Framing::new(
-            self.border_texels as f64 * 16.0,
-            msdfgen::Vector2::new(scale_x as f64, scale_y as f64),
-            msdfgen::Vector2::new(translate_x as f64, translate_y as f64),
-        );
+            = self.border_texels * 0.5
+            - bbox.y_min as f32 * scale_y;
+        let border = self.border_texels as f64;
+        let transform = Affine::from_matrix_unchecked(Matrix::new(
+            scale_x as f64, 0.0, translate_x as f64,
+            0.0, scale_y as f64, translate_y as f64,
+            0.0, 0.0, 1.0,
+        ));
+        shape.transform(&transform);
 
-        let mut bitmap = Bitmap::new(sdf_width_int, sdf_height_int);
+        let mut bitmap = RgbImage::new(sdf_width_int, sdf_height_int);
 
         // Is this still right?
-        shape.edge_coloring_simple(3.0, 0);
+        let colored_shape = Shape::edge_coloring_simple(shape, 0.3, 8).prepare(); // 8 is Admiral's favorite u64 apparently
 
         // render an SDF for it
-        shape.generate_msdf(&mut bitmap, &framing,
-                            EDGE_THRESHOLD, OVERLAP_SUPPORT);
-
-        // convert to 24-bit RGB
-        let bitmap: Bitmap<RGB<u8>> = bitmap.convert();
+        fdsm::generate::generate_msdf(
+            &colored_shape,
+            border,
+            &mut bitmap,
+        );
+        fdsm::render::correct_sign_msdf(&mut bitmap, &colored_shape, FillRule::Nonzero);
+        {
+            use std::fs::File;
+            use std::io::Write;
+            let mut f = File::create("/tmp/thing.ppm").unwrap();
+            write!(f, "P6\n{} {} 255\n", sdf_width_int, sdf_height_int).unwrap();
+            f.write_all(&bitmap.as_flat_samples().as_slice()).unwrap();
+        }
 
         let half_extra_width = (sdf_width - glyph_width)
             / self.texels_per_em_x * 0.5;
@@ -436,7 +439,7 @@ fn put_into_atlas<A, AtlasID: Copy, AtlasCoords: Copy>
      render_x_min: f32, render_y_min: f32,
      render_x_max: f32, render_y_max: f32,
      sdf_width_int: u32, sdf_height_int: u32,
-     bitmap: Bitmap<RGB<u8>>)
+     bitmap: RgbImage)
     -> Result<GlyphState<AtlasID, AtlasCoords>, A::E>
 where A: AtlasHandler<AtlasID=AtlasID, AtlasCoords=AtlasCoords> {
     // put it in the atlas
@@ -472,7 +475,7 @@ where A: AtlasHandler<AtlasID=AtlasID, AtlasCoords=AtlasCoords> {
                                       render_x_max, render_y_max,
                                       atlas_x, atlas_y,
                                       sdf_width_int, sdf_height_int,
-                                      bitmap.raw_pixels())?;
+                                      bitmap.as_flat_samples().as_slice())?;
     Ok(GlyphState {
         atlas: atlas_handle,
         coords,
